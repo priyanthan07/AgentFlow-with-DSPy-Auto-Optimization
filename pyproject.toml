@@ -1,0 +1,13 @@
+[project]
+name = "agentflow-with-dspy-auto-optimization"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dspy>=3.0.1",
+    "fastmcp>=2.11.3",
+    "full>=0.0.3.1",
+    "mlflow>=3.3.0",
+    "tavily-python>=0.7.11",
+]
