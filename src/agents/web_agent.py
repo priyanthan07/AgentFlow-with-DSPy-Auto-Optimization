@@ -6,40 +6,45 @@ from openai import OpenAI
 from pydantic import BaseModel
 from enum import Enum
 
-from mcp_client.client import create_mcp_client
-from util.logger import get_logger
-from config import OPENAI_CONFIG
+from src.mcp_client.client import create_mcp_client
+from src.utils.logger import get_logger
+from src.config import OPENAI_CONFIG
 
 logger = get_logger(__name__)
-    
+
+
 class decisionTypes(str, Enum):
     Conclude = "CONCLUDE"
     Continue = "CONTINUE"
 
+
 class decisionOutputFormat(BaseModel):
-    decision : decisionTypes
+    decision: decisionTypes
     reasoning: str
 
+
 @dataclass
-class ReActStep:             # Represents one complete ReAct cycle
-    iteration : int
-    thought : str
-    action : str
+class ReActStep:  # Represents one complete ReAct cycle
+    iteration: int
+    thought: str
+    action: str
     action_params: Dict[str, Any]
     action_results: Dict[str, Any]
     observation: str
     reflection: str
     timestamp: datetime = datetime.now()
 
+
 @dataclass
 class SearchResult:
-    url : str
+    url: str
     title: str
     snippet: str
     content: str = ""
     source_type: str = "web"
     extracted_at: datetime = datetime.now()
-    
+
+
 @dataclass
 class WebResearchResult:
     query: str
@@ -50,17 +55,19 @@ class WebResearchResult:
     research_depth: str  # "SURFACE", "MODERATE", "DEEP"
     react_trace: List[ReActStep]
     metadata: Dict[str, Any]
-    
+
+
 class WebResearchAgent:
     """
-        Web Research Agent that performs ReAct (Reasoning + Acting) loops to search, analyze, and synthesize web content for research queries.
+    Web Research Agent that performs ReAct (Reasoning + Acting) loops to search, analyze, and synthesize web content for research queries.
     """
+
     def __init__(self):
         self.client = OpenAI(api_key=OPENAI_CONFIG["api_key"])
-        
-        self.max_iterations = 3                 # Maximum ReAct loop iterations
+
+        self.max_iterations = 3  # Maximum ReAct loop iterations
         self.is_initialized = False
-        
+
         self.available_tools = [
             {
                 "type": "function",
@@ -71,11 +78,15 @@ class WebResearchAgent:
                         "type": "object",
                         "properties": {
                             "query": {"type": "string", "description": "Search query"},
-                            "num_results": {"type": "integer", "description": "Number of results (1-20)", "default": 10}
+                            "num_results": {
+                                "type": "integer",
+                                "description": "Number of results (1-20)",
+                                "default": 10,
+                            },
                         },
-                        "required": ["query"]
-                    }
-                }
+                        "required": ["query"],
+                    },
+                },
             },
             {
                 "type": "function",
@@ -87,115 +98,127 @@ class WebResearchAgent:
                         "properties": {
                             "url": {"type": "string", "description": "URL to analyze"},
                             "extract_text": {"type": "boolean", "default": True},
-                            "summarize": {"type": "boolean", "default": True}
+                            "summarize": {"type": "boolean", "default": True},
                         },
-                        "required": ["url"]
-                    }
-                }
-            }
+                        "required": ["url"],
+                    },
+                },
+            },
         ]
 
         logger.info("Web Research Agent initialized successfully")
-        
+
     @classmethod
-    async def create(cls) -> 'WebResearchAgent':
+    async def create(cls) -> "WebResearchAgent":
         agent = cls()
         await agent._initialize_mcp_connection()
         agent.is_initialized = True
         return agent
-    
+
     async def _initialize_mcp_connection(self):
         try:
             self.mcp_client = create_mcp_client()
             await self.mcp_client._initialize_client(server="web_research")
-            
+
             server_tools = [tool["name"] for tool in self.mcp_client.available_tools]
             expected_tools = [tool["function"]["name"] for tool in self.available_tools]
-            
+
             for expected_tool in expected_tools:
                 if expected_tool not in server_tools:
-                    logger.warning(f"Expected tool '{expected_tool}' not available from MCP server")
-            
-            logger.info(f"MCP connection established. Available tools in server : {server_tools}")
-        
+                    logger.warning(
+                        f"Expected tool '{expected_tool}' not available from MCP server"
+                    )
+
+            logger.info(
+                f"MCP connection established. Available tools in server : {server_tools}"
+            )
+
         except Exception as e:
             logger.error(f"Failed to connect with web mcp client: {e}")
             raise RuntimeError(e)
-    
-    async def research(self, task_query: str, context: List[Dict] = None) -> WebResearchResult:
+
+    async def research(
+        self, task_query: str, context: List[Dict] = None
+    ) -> WebResearchResult:
         logger.info(f"Starting web research for query: {task_query}")
-        
+
         research_state = {
             "original_query": task_query,
             "context": context or [],
             "search_results": [],
             "key_findings": [],
-            "analyzed_sources":[],
+            "analyzed_sources": [],
             "iteration": 0,
             "research_complete": False,
-            "react_steps": []
+            "react_steps": [],
         }
-        
-        while (research_state["iteration"] < self.max_iterations) and not research_state["research_complete"]:
-            
+
+        while (
+            research_state["iteration"] < self.max_iterations
+        ) and not research_state["research_complete"]:
             research_state["iteration"] += 1
             logger.info(f"ReAct iteration {research_state['iteration']}")
-            
+
             # Execute one complete ReAct cycle
             react_step = await self._execute_react_cycle(research_state)
             research_state["react_steps"].append(react_step)
-            
+
             if react_step.reflection == "CONCLUDE":
                 research_state["research_complete"] = True
                 logger.info("Agent decided to conclude ReAct loop and research")
-                
+
         # Synthesize final results
         final_result = await self._synthesize_results(research_state)
-        logger.info(f"Web research completed with {len(final_result.search_results)} sources")
-        
+        logger.info(
+            f"Web research completed with {len(final_result.search_results)} sources"
+        )
+
         return final_result
-    
+
     async def _execute_react_cycle(self, research_state: Dict) -> ReActStep:
         """
-            Execute one complete ReAct cycle:
-            1. THOUGHT: Reason about current state and what to do next
-            2. ACTION: Take a specific action based on the thought
-            3. OBSERVATION: Process and understand the action results
-            4. REFLECTION: Evaluate progress and plan next steps
+        Execute one complete ReAct cycle:
+        1. THOUGHT: Reason about current state and what to do next
+        2. ACTION: Take a specific action based on the thought
+        3. OBSERVATION: Process and understand the action results
+        4. REFLECTION: Evaluate progress and plan next steps
         """
-        
+
         # THOUGHT: Analyze current state and plan next action
         thought = await self._generate_thought(research_state)
         logger.info(f"Thought completed: {thought}")
-        
+
         # ACTION: Execute the planned action
         action_result = await self._execute_action(thought, research_state)
-        logger.info(f"ACTION: {action_result['action_name']} with params {action_result['params']}")
-        
+        logger.info(
+            f"ACTION: {action_result['action_name']} with params {action_result['params']}"
+        )
+
         # OBSERVATION: Process and understand the action results
         observation = await self._generate_observation(action_result, research_state)
         logger.info(f"Observation: {observation}")
-        
+
         # REFLECTION: Evaluate progress and decide next steps
-        reflection = await self._generate_reflection(thought, action_result, observation, research_state)
+        reflection = await self._generate_reflection(
+            thought, action_result, observation, research_state
+        )
         logger.info(f"REFLECTION: {reflection}")
-        
+
         # Create ReAct step record
         react_step = ReActStep(
             iteration=research_state["iteration"],
             thought=thought,
             action=f"{action_result['action_name']}({action_result['params']})",
-            action_params=action_result['params'],
+            action_params=action_result["params"],
             action_results=action_result["result"],
             observation=observation,
-            reflection=reflection
+            reflection=reflection,
         )
         return react_step
-    
+
     async def _generate_thought(self, research_state: Dict) -> str:
-        
         state_summary = self._build_state_summary(research_state)
-        
+
         thought_prompt = f"""
             You are in the THOUGHT phase of ReAct methodology. Analyze your current research state and reason about what to do next.
             
@@ -213,29 +236,33 @@ class WebResearchAgent:
             make sure the current year is 2025. 
         """
         try:
-            
             response = self.client.chat.completions.create(
-                model = OPENAI_CONFIG["default_model"],
+                model=OPENAI_CONFIG["default_model"],
                 messages=[
-                    {"role": "system", "content": "You are an expert researcher in the THOUGHT phase of ReAct. Provide clear, logical reasoning about what to do next."},
-                    {"role": "user", "content": thought_prompt}
+                    {
+                        "role": "system",
+                        "content": "You are an expert researcher in the THOUGHT phase of ReAct. Provide clear, logical reasoning about what to do next.",
+                    },
+                    {"role": "user", "content": thought_prompt},
                 ],
-                temperature=0.1
+                temperature=0.1,
             )
 
             thought = response.choices[0].message.content
             return thought
-        
+
         except Exception as e:
             logger.error(f"Error generating thought: {e}")
             return f"I need to gather more information about {research_state['original_query']} to make progress."
-            
-    async def _execute_action(self, thought: str, research_state: Dict) -> Dict[str, Any]:
+
+    async def _execute_action(
+        self, thought: str, research_state: Dict
+    ) -> Dict[str, Any]:
         """
-            ACTION phase: Execute a specific action based on the thought.
-            The agent chooses and executes a tool based on its reasoning.
+        ACTION phase: Execute a specific action based on the thought.
+        The agent chooses and executes a tool based on its reasoning.
         """
-        
+
         action_prompt = f"""
             You are in the ACTION phase of ReAct methodology. Based on your previous thought, choose and execute the most appropriate action.
             
@@ -254,44 +281,51 @@ class WebResearchAgent:
             response = self.client.chat.completions.create(
                 model=OPENAI_CONFIG["default_model"],
                 messages=[
-                    {"role": "system", "content": "You are in the ACTION phase. Choose and execute one tool based on your thought."},
-                    {"role": "user", "content": action_prompt}
+                    {
+                        "role": "system",
+                        "content": "You are in the ACTION phase. Choose and execute one tool based on your thought.",
+                    },
+                    {"role": "user", "content": action_prompt},
                 ],
                 tools=self.available_tools,
-                tool_choice="required", 
-                temperature=0.1
+                tool_choice="required",
+                temperature=0.1,
             )
-            
+
             tool_call = response.choices[0].message.tool_calls[0]
-            action_name  = tool_call.function.name
+            action_name = tool_call.function.name
             action_params = json.loads(tool_call.function.arguments)
-            
+
             if action_name == "web_search":
                 result = await self._execute_web_search(action_params, research_state)
-            
+
             elif action_name == "analyze_webpage":
-                result = await self._execute_webpage_analysis(action_params, research_state)
-            
+                result = await self._execute_webpage_analysis(
+                    action_params, research_state
+                )
+
             else:
                 result = {"error": f"Unknown action: {action_name}"}
-                
+
             return {
                 "action_name": action_name,
                 "params": action_params,
                 "result": result,
-                "success": result.get("success", True)
+                "success": result.get("success", True),
             }
-            
+
         except Exception as e:
             logger.error(f"Error executing action: {e}")
             return {
                 "action_name": "error",
                 "params": {},
                 "result": {"error": str(e)},
-                "success": False
+                "success": False,
             }
-            
-    async def _generate_observation(self, action_result: Dict, research_state: Dict) -> str:
+
+    async def _generate_observation(
+        self, action_result: Dict, research_state: Dict
+    ) -> str:
         observation_prompt = f"""
             You are in the OBSERVATION phase of ReAct methodology. Analyze the results of your recent action and understand what they mean for your research.
             
@@ -314,42 +348,53 @@ class WebResearchAgent:
             response = self.client.chat.completions.create(
                 model=OPENAI_CONFIG["default_model"],
                 messages=[
-                    {"role": "system", "content": "You are in the OBSERVATION phase. Interpret the action results and explain what you learned."},
-                    {"role": "user", "content": observation_prompt}
+                    {
+                        "role": "system",
+                        "content": "You are in the OBSERVATION phase. Interpret the action results and explain what you learned.",
+                    },
+                    {"role": "user", "content": observation_prompt},
                 ],
-                temperature=0.2
+                temperature=0.2,
             )
-            
+
             observation = response.choices[0].message.content.strip()
             return observation
-            
+
         except Exception as e:
             logger.error(f"Error generating observation: {e}")
             return f"Action completed but encountered an error: {str(e)}"
-    
+
     def _build_state_summary(self, research_state: Dict) -> str:
         summary_parts = []
-        
-        summary_parts.append(f"Iteration: {research_state['iteration']}/{self.max_iterations}")
-        summary_parts.append(f"Search results found: {len(research_state['search_results'])}")
-        summary_parts.append(f"Sources analyzed: {len(research_state['analyzed_sources'])}")
+
+        summary_parts.append(
+            f"Iteration: {research_state['iteration']}/{self.max_iterations}"
+        )
+        summary_parts.append(
+            f"Search results found: {len(research_state['search_results'])}"
+        )
+        summary_parts.append(
+            f"Sources analyzed: {len(research_state['analyzed_sources'])}"
+        )
         summary_parts.append(f"Key findings: {len(research_state['key_findings'])}")
-        
-        if research_state['key_findings']:
+
+        if research_state["key_findings"]:
             summary_parts.append("Recent findings:")
-            for finding in research_state['key_findings'][-5:]:  # Last 3 findings
+            for finding in research_state["key_findings"][-5:]:  # Last 3 findings
                 summary_parts.append(f"  - {finding}")
-        
-        if research_state['react_steps']:
-            last_step = research_state['react_steps'][-1]
+
+        if research_state["react_steps"]:
+            last_step = research_state["react_steps"][-1]
             summary_parts.append(f"Last action: {last_step.action}")
             summary_parts.append(f"Last observation: {last_step.observation}")
-        
+
         return "\n".join(summary_parts)
-    
-    async def _generate_reflection(self, thought: str, action_result: Dict, observation: str, research_state: Dict) -> str:
+
+    async def _generate_reflection(
+        self, thought: str, action_result: Dict, observation: str, research_state: Dict
+    ) -> str:
         state_summary = self._build_state_summary(research_state)
-        
+
         reflection_prompt = f"""
             You are in the REFLECTION phase of ReAct methodology. Step back and evaluate your overall research progress.
             
@@ -379,25 +424,27 @@ class WebResearchAgent:
             response = self.client.responses.parse(
                 model=OPENAI_CONFIG["default_model"],
                 input=[
-                    {"role": "system", "content": "You are in the REFLECTION phase. Evaluate progress and decide whether to continue or conclude."},
-                    {"role": "user", "content": reflection_prompt}
+                    {
+                        "role": "system",
+                        "content": "You are in the REFLECTION phase. Evaluate progress and decide whether to continue or conclude.",
+                    },
+                    {"role": "user", "content": reflection_prompt},
                 ],
                 text_format=decisionOutputFormat,
-                temperature=0.3
+                temperature=0.3,
             )
-            
+
             reflection = json.loads(response.output[0].content[0].text)
             return reflection["decision"]
-            
+
         except Exception as e:
             logger.error(f"Error generating reflection: {e}")
             return "Need to continue research to gather more information. CONTINUE research"
-        
+
     async def _execute_web_search(self, args, research_state: Dict) -> Dict[str, Any]:
         try:
-           
-            search_response = await self.mcp_client.call_tool("web_search",args)
-            
+            search_response = await self.mcp_client.call_tool("web_search", args)
+
             new_results = []
             if search_response.get("success") and search_response.get("results"):
                 for result_data in search_response["results"]:
@@ -405,67 +452,77 @@ class WebResearchAgent:
                         url=result_data.get("url", ""),
                         title=result_data.get("title", ""),
                         snippet=result_data.get("snippet", ""),
-                        source_type="web_search"
+                        source_type="web_search",
                     )
                     new_results.append(search_result)
-                    
+
                 research_state["search_results"].extend(new_results)
-                
-                
+
                 return {
                     "message": f"Found {len(new_results)} search results",
-                    "results": [{"url": r.url, "title": r.title, "snippet": r.snippet} for r in new_results],
-                    "success": True
+                    "results": [
+                        {"url": r.url, "title": r.title, "snippet": r.snippet}
+                        for r in new_results
+                    ],
+                    "success": True,
                 }
             else:
-                return {"success": False, "error": search_response.get("error", "Search failed")}
-            
+                return {
+                    "success": False,
+                    "error": search_response.get("error", "Search failed"),
+                }
+
         except Exception as e:
             logger.error(f"Error performing web search: {e}")
             return {"success": False, "error": str(e)}
-            
-    async def _execute_webpage_analysis(self, args, research_state: Dict) -> Dict[str, Any]:
 
+    async def _execute_webpage_analysis(
+        self, args, research_state: Dict
+    ) -> Dict[str, Any]:
         try:
             analysis_response = await self.mcp_client.call_tool("analyze_webpage", args)
-            
+
             if analysis_response.get("success"):
                 content = analysis_response.get("content", "")
                 summary = analysis_response.get("summary", "")
                 url = args["url"]
-                
+
                 # Store analyzed source
                 analysis_result = {
                     "url": url,
                     "title": analysis_response.get("title", ""),
                     "content": content,
                     "summary": summary,
-                    "word_count": analysis_response.get("word_count", 0)
+                    "word_count": analysis_response.get("word_count", 0),
                 }
                 research_state["analyzed_sources"].append(analysis_result)
-                
+
                 # Extract key findings
-                key_findings = await self._extract_key_findings(content, research_state["original_query"])
+                key_findings = await self._extract_key_findings(
+                    content, research_state["original_query"]
+                )
                 research_state["key_findings"].extend(key_findings)
-                
+
                 return {
                     "success": True,
                     "title": analysis_response.get("title", ""),
                     "summary": summary,
                     "word_count": analysis_response.get("word_count", 0),
-                    "key_findings": key_findings
+                    "key_findings": key_findings,
                 }
             else:
-                return {"success": False, "error": analysis_response.get("error", "Analysis failed")}
-                
+                return {
+                    "success": False,
+                    "error": analysis_response.get("error", "Analysis failed"),
+                }
+
         except Exception as e:
             return {"success": False, "error": str(e)}
-            
-        
+
     async def _extract_key_findings(self, content: str, query: str) -> List[str]:
         try:
             content_sample = content[:2000] if len(content) > 2000 else content
-            
+
             extraction_prompt = f"""
                 Extract the most important findings from this content that relate to the research query.
                 
@@ -481,27 +538,29 @@ class WebResearchAgent:
                 Format each finding as a complete sentence.
                 Return only the findings, one per line.
             """
-            
+
             response = self.client.chat.completions.create(
                 model=OPENAI_CONFIG["default_model"],
                 messages=[
-                    {"role": "system", "content": "You are an expert at extracting key research findings."},
-                    {"role": "user", "content": extraction_prompt}
+                    {
+                        "role": "system",
+                        "content": "You are an expert at extracting key research findings.",
+                    },
+                    {"role": "user", "content": extraction_prompt},
                 ],
-                temperature=0.3
+                temperature=0.3,
             )
-            
+
             findings_text = response.choices[0].message.content.strip()
-            findings = [f.strip() for f in findings_text.split('\n') if f.strip()]
-            
+            findings = [f.strip() for f in findings_text.split("\n") if f.strip()]
+
             return findings[:5]  # Limit to 5 findings per source
-            
+
         except Exception as e:
             logger.error(f"Error extracting key findings: {e}")
             return []
-    
-    async def _synthesize_results(self, research_state: Dict) -> WebResearchResult:
 
+    async def _synthesize_results(self, research_state: Dict) -> WebResearchResult:
         try:
             react_summary = []
             for step in research_state["react_steps"]:
@@ -511,7 +570,7 @@ class WebResearchAgent:
                 react_summary.append(f"  OBSERVATION: {step.observation}")
                 react_summary.append(f"  REFLECTION: {step.reflection}")
                 react_summary.append("")
-            
+
             synthesis_prompt = f"""
                 Create a comprehensive research summary based on the ReAct research process:
                 
@@ -529,21 +588,24 @@ class WebResearchAgent:
                 
                 Keep the summary comprehensive but concise (300-500 words).
             """
-            
+
             response = self.client.chat.completions.create(
                 model=OPENAI_CONFIG["default_model"],
                 messages=[
-                    {"role": "system", "content": "Create a comprehensive research summary showing how ReAct methodology produced thorough results."},
-                    {"role": "user", "content": synthesis_prompt}
+                    {
+                        "role": "system",
+                        "content": "Create a comprehensive research summary showing how ReAct methodology produced thorough results.",
+                    },
+                    {"role": "user", "content": synthesis_prompt},
                 ],
-                temperature=0.4
+                temperature=0.4,
             )
-            
+
             summary = response.choices[0].message.content.strip()
-            
+
             # Determine research depth
             research_depth = self._determine_research_depth(research_state)
-            
+
             # Create final result object
             result = WebResearchResult(
                 query=research_state["original_query"],
@@ -558,12 +620,13 @@ class WebResearchAgent:
                     "total_sources_found": len(research_state["search_results"]),
                     "react_cycles": len(research_state["react_steps"]),
                     "research_completed_at": datetime.now().isoformat(),
-                    "methodology": "ReAct (Reasoning and Acting)"
-                }
+                    "methodology": "ReAct (Reasoning and Acting)",
+                    "optimization_method": "manual",
+                },
             )
-            
+
             return result
-            
+
         except Exception as e:
             logger.error(f"Error synthesizing ReAct results: {e}")
             # Return a basic result even if synthesis fails
@@ -575,18 +638,17 @@ class WebResearchAgent:
                 sources_analyzed=len(research_state["analyzed_sources"]),
                 research_depth="moderate",
                 react_trace=research_state["react_steps"],
-                metadata={"error": str(e)}
+                metadata={"error": str(e)},
             )
-            
+
     def _determine_research_depth(self, research_state: Dict) -> str:
         cycles = len(research_state["react_steps"])
         sources_count = len(research_state["analyzed_sources"])
         findings_count = len(research_state["key_findings"])
-        
+
         if cycles >= 4 and sources_count >= 5 and findings_count >= 10:
             return "DEEP"
         elif cycles >= 2 and sources_count >= 3 and findings_count >= 5:
             return "MODERATE"
         else:
             return "SURFACE"
-        
