@@ -81,7 +81,6 @@ class WebResearchAgent:
                             "num_results": {
                                 "type": "integer",
                                 "description": "Number of results (1-20)",
-                                "default": 10,
                             },
                         },
                         "required": ["query"],

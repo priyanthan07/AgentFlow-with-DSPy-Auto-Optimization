@@ -1,146 +1,181 @@
-import statistics
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from src.agents.dspy_web_agent import WebResearchResult
 from src.utils.logger import get_logger
+from src.config import EVALUATION_CRITERIA
 
 logger = get_logger(__name__)
+
 
 @dataclass
 class MetricResult:
     """Container for metric evaluation results."""
+
     score: float
     breakdown: Dict[str, float]
-    metadata : Dict[str, Any]
+    metadata: Dict[str, Any]
 
-class ResearchQualityMetrics:
-    """Comprehensive research quality evaluation metrics."""
 
-    def __init__(self, weights: Optional[Dict[str, float]] = None):
-        if weights:
-            self.weights = weights
-        else:
-            self.weights = {
-                "sources" : 0.25,
-                "findings" : 0.35,
-                "depth" : 0.25
-            }
-            
-    def research_quality_metric(self, example, pred, trace=None) -> float:
-        """Main DSPy metric function for optimization."""
+@dataclass
+class GroundTruthCriteria:
+    """Ground truth criteria for evaluation."""
+
+    expected_topics: List[str]
+    min_sources: int
+    min_findings: int
+    domain: str
+
+
+class ResearchMetrics:
+    """Hybrid evaluation combining ground truth validation with self-reported quality metrics."""
+
+    def __init__(self):
+        self.weights = {"ground_truth": 0.6, "self_reported": 0.4}
+
+        self.ground_weight = {
+            "topic_coverage": 0.4,
+            "source_adequacy": 0.3,
+            "findings_quality": 0.3,
+        }
+
+    def evaluate_research_quality(self, example, pred, trace=None) -> float:
+        """
+        Main DSPy metric that combines ground truth validation with self-reported quality.
+        """
         try:
-            if not hasattr(pred, "sources_analyzed") or not hasattr(pred, "key_findings"):
+            if not hasattr(pred, "key_findings") or not hasattr(
+                pred, "sources_analyzed"
+            ):
+                logger.warning("Prediction missing required attributes")
                 return 0.0
-            
-            result = self.comprehensive_evaluation(pred)
-            return result.score
-        
+
+            # Get query from example
+            query = getattr(example, "query", "").lower()
+
+            # Try ground truth evaluation first
+            ground_truth_score = self._calculate_ground_truth_score(query, pred)
+
+            # Calculate self-reported quality score
+            self_reported_score = self._calculate_self_reported_score(pred)
+
+            # Combine scores based on availability
+            if ground_truth_score is not None:
+                # We have ground truth - use hybrid approach
+                final_score = (
+                    ground_truth_score * self.weights["ground_truth"]
+                    + self_reported_score * self.weights["self_reported"]
+                )
+                logger.debug(
+                    f"Hybrid score: GT={ground_truth_score:.3f}, Self={self_reported_score:.3f}, Final={final_score:.3f}"
+                )
+            else:
+                # No ground truth available - use self-reported with penalty
+                final_score = (
+                    self_reported_score * 0.8
+                )  # 20% penalty for no external validation
+                logger.debug(f"Self-reported only score: {final_score:.3f} (penalized)")
+
+            return min(final_score, 1.0)
+
         except Exception as e:
-            logger.error(f"Error in quality metric: {e}")
+            logger.error(f"Error in hybrid metric: {e}")
             return 0.0
 
-    def comprehensive_evaluation(self, result: WebResearchResult) -> MetricResult:
-        """Comprehensive evaluation with detailed breakdown."""
+    def _calculate_ground_truth_score(
+        self, query: str, pred: WebResearchResult
+    ) -> Optional[float]:
+        """Calculate ground truth score if criteria exist for this query."""
+
+        criteria = None
+        for key_phrase, crit in EVALUATION_CRITERIA.items():
+            key_words = key_phrase.split()[:4]
+            matches = sum(1 for word in key_words if word in query)
+
+            if matches >= 2:
+                criteria = crit
+                logger.debug(f"Found criteria for query using key: {key_phrase}")
+                break
+
+        if not criteria:
+            logger.warning(f"No evaluation criteria found for query: {query}")
+            return None
+
+        # Topic coverage score (0-1)
+        topic_score = self._calculate_topic_coverage(
+            pred.key_findings, criteria.expected_topics
+        )
+
+        # Source adequacy score (0-1)
+        source_score = min(pred.sources_analyzed / max(criteria.min_sources, 1), 1.0)
+
+        # Findings quality score (0-1)
+        findings_score = min(
+            len(pred.key_findings) / max(criteria.min_findings, 1), 1.0
+        )
+
+        # Weighted final score
+        final_score = (
+            topic_score * self.ground_weight["topic_coverage"]
+            + source_score * self.ground_weight["source_adequacy"]
+            + findings_score * self.ground_weight["findings_quality"]
+        )
+        return final_score
+
+    def _calculate_topic_coverage(
+        self, findings: List[str], expected_topics: List[str]
+    ) -> float:
+        """Calculate how well findings cover expected topics."""
+
+        if not expected_topics or not findings:
+            return 0.0
+
+        findings_text = " ".join(findings).lower()
+
+        covered_topics = 0
+        for topic in expected_topics:
+            topic_words = topic.lower().split()
+            matching_words = sum(1 for word in topic_words if word in findings_text)
+
+            if len(topic_words) > 0 and matching_words / len(topic_words) >= 0.5:
+                covered_topics += 1
+                logger.debug(
+                    f"Topic '{topic}' covered with {matching_words}/{len(topic_words)} words"
+                )
+
+        coverage_ratio = covered_topics / len(expected_topics)
+        logger.debug(
+            f"Topic coverage: {covered_topics}/{len(expected_topics)} = {coverage_ratio:.3f}"
+        )
+        return coverage_ratio
+
+    def _calculate_self_reported_score(self, pred: WebResearchResult) -> float:
+        """Calculate quality score based on self-reported metrics."""
 
         # Source diversity score (0.0 - 1.0)
-        sources_score = min(result.sources_analyzed / 5.0, 1.0)   # 5 is more than enough
+        sources_score = min(pred.sources_analyzed / 7.0, 1.0)
 
-        # Key findings quality (0.0 - 1.0)
-        findings_score = min(len(result.key_findings) / 8.0, 1.0) # 8 is more than enough
+        # Key findings score (0.0 - 1.0)
+        findings_score = min(len(pred.key_findings) / 8.0, 1.0)
 
-        # Research depth (0-0.3)
+        # Research depth score (0.0 - 1.0)
         depth_scores = {"SURFACE": 0.4, "MODERATE": 0.7, "DEEP": 1.0}
-        depth_score = depth_scores.get(result.research_depth, 0.0)
+        depth_score = depth_scores.get(pred.research_depth, 0.4)
 
-        # Weighted total score
-        total_score = (
-            sources_score * self.weights["sources"] +
-            findings_score * self.weights["findings"] +
-            depth_score * self.weights["depth"]
-        )
+        # Efficiency penalty - too many iterations suggests poor planning
+        iterations = len(pred.react_trace) if pred.react_trace else 1
+        efficiency_penalty = max(
+            0.0, (iterations - 3) * 0.05
+        )  # Small penalty for >3 iterations
 
-        breakdown = {
-            "sources_score": sources_score,
-            "findings_score": findings_score,
-            "depth_score": depth_score,
-            "weighted_total": total_score
-        }
+        # Weighted score
+        raw_score = sources_score * 0.3 + findings_score * 0.4 + depth_score * 0.3
+        final_score = max(0.0, raw_score - efficiency_penalty)
 
-        metadata = {
-            "sources_analyzed": result.sources_analyzed,
-            "findings_count": len(result.key_findings),
-            "research_depth": result.research_depth,
-            "iterations": len(result.react_trace) if result.react_trace else 0
-        }
+        return final_score
 
-        return MetricResult(
-            score=total_score,
-            breakdown=breakdown,
-            metadata=metadata
-        )
-    
-class PerformanceMetrics:
-    """Performance and efficiency metrics."""
 
-    @staticmethod
-    def efficiency_score(result: WebResearchResult) -> float:
-        """Calculate efficiency based on iterations and output quality."""
-
-        max_iterations = 5
-        iterations = len(result.react_trace) if result.react_trace else 1
-
-        # Efficiency = quality / iterations (normalized)
-        quality = ResearchQualityMetrics().research_quality_metric(None, result)
-        efficiency = quality / (iterations/max_iterations)
-
-        return min(efficiency, 1.0)
-    
-    @staticmethod
-    def consistency_score(results: List[WebResearchResult]) -> float:
-        # Efficiency = quality / iterations (normalized)
-        if len(results) < 2:
-            return 1.0
-        
-        scores = [ResearchQualityMetrics().research_quality_metric(None, result) for result in results]
-        std_dev = statistics.stdev(scores)
-
-        # Lower standard deviation = higher consistency
-        # Normalize to 0-1 scale (assuming max std_dev of 0.5)
-        consistency = max(0.0, 1.0 - (std_dev/0.5))
-        return consistency
-    
-class DomainSpecificMetrics:
-    """Domain-specific evaluation metrics."""
-
-    @staticmethod
-    def technical_accuracy_metric(example, pred, trace=None) -> float:
-        """Metric optimized for technical queries."""
-        base_score = ResearchQualityMetrics().research_quality_metric(example, pred, trace)
-
-        # Bonus for technical depth
-        if hasattr(pred, 'research_depth') and pred.research_depth == "DEEP":
-            base_score *=1.2
-
-        # Bonus for multiple technical sources
-        if hasattr(pred, 'sources_analyzed') and pred.sources_analyzed >= 4:
-            base_score *= 1.1
-
-        return min(base_score, 1.0)
-
-    @staticmethod
-    def speed_optimized_metric(example, pred, trace=None) -> float:
-        """Metric that balances quality with speed."""
-
-        quality_score = ResearchQualityMetrics().research_quality_metric(example, pred, trace)
-
-        # penalty for too many iterations
-        iterations = len(pred.react_trace) if hasattr(pred, 'react_trace') and pred.react_trace else 1
-        speed_penalty = max(0.0, (iterations-2) * 0.1)
-        
-        final_score = quality_score - speed_penalty
-        return max(0.0, final_score)
-    
 # Export main metric function for DSPy
 def research_quality_metric(example, pred, trace=None) -> float:
     """Main metric function for DSPy optimization."""
-    return ResearchQualityMetrics().research_quality_metric(example, pred, trace)
+    evaluator = ResearchMetrics()
+    return evaluator.evaluate_research_quality(example, pred, trace)

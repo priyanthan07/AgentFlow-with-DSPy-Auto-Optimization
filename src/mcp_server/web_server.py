@@ -122,7 +122,11 @@ async def analyze_webpage(
                 "word_count": len(content.split()) if content else 0,
             }
         else:
-            return {"success": False, "error": "No content extracted from URL", "url": url}
+            return {
+                "success": False,
+                "error": "No content extracted from URL",
+                "url": url,
+            }
 
     except Exception as e:
         return {"success": False, "error": str(e)}

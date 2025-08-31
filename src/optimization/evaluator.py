@@ -1,176 +1,300 @@
 import mlflow
 import time
+import json
 from typing import Dict, List, Any, Tuple
+from collections import Counter
 from src.agents.web_agent import WebResearchAgent
 from src.agents.dspy_web_agent import DSPyWebResearchAgent
 from src.optimization.metrics import research_quality_metric
 from src.utils.logger import get_logger
+from dataclasses import dataclass
+from src.config import EVALUATION_CRITERIA
 
 logger = get_logger(__name__)
 
+
+@dataclass
+class EvaluationExample:
+    query: str
+
+
 class AgentEvaluator:
-    """Comprehensive agent evaluation with quality-focused metrics."""
+    """Agent evaluator with separated quality and speed metrics to avoid bias."""
 
-    async def compare_agents(self, original_agent: WebResearchAgent, dspy_agent: DSPyWebResearchAgent, test_queries: List[str]) -> tuple[Dict[str, List], Dict[str, float]]:
-        """
-            Compare performance of original and DSPy agents.
-        """
-        results = {"original":[], "dspy":[]}
+    async def compare_agents(
+        self,
+        original_agent: WebResearchAgent,
+        dspy_agent: DSPyWebResearchAgent,
+        test_queries: List[str],
+    ) -> Tuple[Dict[str, List], Dict[str, float]]:
+        """Compare agents with separated quality and speed metrics."""
 
+        test_data = []
         for query in test_queries:
-            logger.info(f"Evaluating query: {query}")
+            if self._has_evaluation_criteria(query):
+                test_data.append(query)
+            else:
+                logger.warning(f"No evaluation criteria for query: {query}")
+
+        if not test_data:
+            logger.warning("No test queries have evaluation criteria defined")
+            test_data = test_queries
+
+        logger.info(
+            f"Evaluating {len(test_data)} queries with ground truth criteria"
+        )
+
+        results = {"original": [], "dspy": []}
+        search_patterns = {"original": [], "dspy": []}
+
+        for query_idx, query in enumerate(test_data):
+            logger.info(
+                f"Evaluating query {query_idx + 1}/{len(test_data)}: {query}"
+            )
 
             # Test original agent
-            with mlflow.start_run(run_name=f"Original_agent_{query[:20]}", nested=True):
-                start_time = time.time()
-                original_result = await original_agent.research(query)
-                original_time = time.time() - start_time
+            (
+                original_metrics,
+                original_searches,
+            ) = await self._evaluate_agent_with_ground_truth(
+                original_agent, query, "original"
+            )
+            results["original"].append(original_metrics)
+            search_patterns["original"].extend(original_searches)
 
-                original_metrics = self._calculate_detailed_metrics(original_result, original_time)
-                results["original"].append(original_metrics)
+            # Log directly to current run
+            mlflow.log_metrics(
+                {
+                    f"original_q{query_idx + 1}_quality_score": original_metrics[
+                        "quality_score"
+                    ],
+                    f"original_q{query_idx + 1}_execution_time": original_metrics[
+                        "execution_time_seconds"
+                    ],
+                    f"original_q{query_idx + 1}_sources": original_metrics[
+                        "sources_analyzed"
+                    ],
+                }
+            )
 
-                mlflow.log_param("query", query)
-                mlflow.log_param("agent_type", "original")
-                for key, value in original_metrics.items():
-                    if isinstance(value, (int, float)):
-                        mlflow.log_metric(key, value)
+            # Test DSPy agent -
+            dspy_metrics, dspy_searches = await self._evaluate_agent_with_ground_truth(
+                dspy_agent, query, "dspy"
+            )
+            results["dspy"].append(dspy_metrics)
+            search_patterns["dspy"].extend(dspy_searches)
 
-            # Test DSPy agent
-            with mlflow.start_run(run_name=f"DSPy_Agent_{query[:20]}", nested=True):
-                start_time = time.time()
-                dspy_result = await dspy_agent.research(query)
-                dspy_time = time.time() - start_time
+            # Log directly to current run
+            mlflow.log_metrics(
+                {
+                    f"dspy_q{query_idx + 1}_quality_score": dspy_metrics[
+                        "quality_score"
+                    ],
+                    f"dspy_q{query_idx + 1}_execution_time": dspy_metrics[
+                        "execution_time_seconds"
+                    ],
+                    f"dspy_q{query_idx + 1}_sources": dspy_metrics["sources_analyzed"],
+                }
+            )
 
-                dspy_metrics = self._calculate_detailed_metrics(dspy_result, dspy_time)
-                results["dspy"].append(dspy_metrics)
+        # Calculate improvements - SEPARATED metrics
+        improvements = self._calculate_separated_improvements(results)
 
-                # Log to MLflow
-                mlflow.log_param("query", query)
-                mlflow.log_param("agent_type", "dspy_optimized")
-                for key, value in dspy_metrics.items():
-                    if isinstance(value, (int, float)):
-                        mlflow.log_metric(key, value)
-            
-        # Calculate improvements
-        improvements = self._calculate_improvements(results)
-        
-        with mlflow.start_run(run_name="Agent_Comparison_Summary", nested=True):
-            for metric, improvement in improvements.items():
-                mlflow.log_metric(f"improvement_{metric}", improvement)
+        # Analyze search diversity
+        search_analysis = self._analyze_search_diversity(search_patterns)
 
-            # Log overall assessment
-            overall_improvement = sum(improvements.values()) / len(improvements)
-            mlflow.log_metric("overall_improvement_percent", overall_improvement)
-            
-            # Log success criteria
-            mlflow.log_metric("quality_improved", 1 if improvements.get("quality_score", 0) > 0 else 0)
-            mlflow.log_metric("efficiency_improved", 1 if improvements.get("efficiency_score", 0) > 0 else 0)
+        # Log all results to current MLflow run (no nested runs)
+        mlflow.log_metrics(improvements)
+        mlflow.log_metrics(search_analysis)
 
-        logger.info(f"Comparison completed. Improvements: {improvements}")
+        # Log search pattern analysis
+        self._log_evaluation_analysis(results)
+
+        logger.info(f"Comparison completed. Quality improvements: {improvements}")
         return results, improvements
 
-    def _calculate_detailed_metrics(self, result, exe_time: float) -> Dict[str, Any]:
+    def _has_evaluation_criteria(self, query: str) -> bool:
+        """Check if query has ground truth evaluation criteria."""
+        query_lower = query.lower()
+        for key_phrase in EVALUATION_CRITERIA.keys():
+            key_words = key_phrase.split()[:4]
+            matches = sum(1 for word in key_words if word in query_lower)
+            if matches >= 2:
+                return True
+        return False
 
-        # Basic metrics
-        base_metrics = {
-            "query": result.query,
-            "sources_analyzed": result.sources_analyzed,
-            "key_findings_count": len(result.key_findings),
-            "research_depth": result.research_depth,
-            "iterations": len(result.react_trace),
-            "execution_time_seconds": round(exe_time, 2)
-        }
+    async def _evaluate_agent_with_ground_truth(
+        self, agent, query: str, agent_type: str
+    ) -> Tuple[Dict[str, Any], List[str]]:
+        """Simple agent evaluation with separated metrics."""
 
-        quality_score = research_quality_metric(None, result)
- 
-        efficiency_score = quality_score / max(exe_time/60, 0.1)  # Quality per minute
-        iteration_efficiency= quality_score / max(len(result.react_trace), 1) # Quality per iteration
+        start_time = time.time()
 
-        # Research completeness assessment
-        completeness_score = self._assess_completeness(result)
+        try:
+            result = await agent.research(query)
+            execution_time = time.time() - start_time
 
-        # Source relevance assessment
-        relevance_score = self._assess_source_relevance(result)
+            example = EvaluationExample(query=query)
 
-        comprehensive_metrics ={
-            **base_metrics,
-            "quality_score" : round(quality_score, 3),
-            "efficiency_score": round(efficiency_score, 3),
-            "iteration_efficiency": round(iteration_efficiency, 3),
-            "completeness_score": round(completeness_score, 3),
-            "relevance_score": round(relevance_score, 3),
-            "overall_research_score": round((quality_score + completeness_score + relevance_score) / 3, 3)
-        }
+            quality_score = research_quality_metric(example, result)
 
-        return comprehensive_metrics
-    
-    def _assess_completeness(self, result) -> float:
+            # Extract search queries for diversity analysis
+            search_queries = self._extract_search_queries(result)
 
-        completeness_factors = []
+            metrics = {
+                "query": query,
+                "agent_type": agent_type,
+                # Quality metrics (time-independent)
+                "quality_score": round(quality_score, 4),
+                "sources_analyzed": result.sources_analyzed,
+                "key_findings_count": len(result.key_findings),
+                "research_depth": result.research_depth,
+                # Speed metrics (separated from quality)
+                "execution_time_seconds": round(execution_time, 2),
+                "iterations": len(result.react_trace) if result.react_trace else 0,
+                # Process metrics
+                "search_queries_count": len(search_queries),
+                "unique_search_queries": len(set(search_queries)),
+            }
 
-        # Source diversity (0.0 - 1.0)
-        source_diversity = min(result.sources_analyzed / 4.0, 1.0)  # Target: 4+ sources
-        completeness_factors.append(source_diversity)
+            return metrics, search_queries
 
-        # FInding richness (0.0 - 1.0) 
-        finding_richness = min(len(result.key_findings)/6.0, 1.0)   # Target: 6+ findings
-        completeness_factors.append(finding_richness)
+        except Exception as e:
+            logger.error(f"Error evaluating {agent_type} agent: {e}")
+            return {
+                "query": query,
+                "agent_type": agent_type,
+                "quality_score": 0.0,
+                "sources_analyzed": 0,
+                "key_findings_count": 0,
+                "research_depth": "SURFACE",
+                "execution_time_seconds": 0.0,
+                "iterations": 0,
+                "search_queries_count": 0,
+                "unique_search_queries": 0,
+                "error": str(e),
+            }, []
 
-        # Research depth appropriateness (0.0 - 1.0)
-        depth_scores = {"SURFACE": 0.4, "MODERATE": 0.7, "DEEP": 1.0}
-        depth_score = depth_scores.get(result.research_depth, 0.0)
-        completeness_factors.append(depth_score)
+    def _extract_search_queries(self, result) -> List[str]:
+        """Extract search queries from research result."""
+        search_queries = []
 
-        # Summary quality
-        summary_length_score = min(len(result.summary.split()) / 200, 1.0)  # Target: 200+ words
-        completeness_factors.append(summary_length_score)
+        if hasattr(result, "react_trace") and result.react_trace:
+            for step in result.react_trace:
+                if "web_search" in step.action.lower() and step.action_params:
+                    query = step.action_params.get("query", "")
+                    if query:
+                        search_queries.append(query.lower().strip())
 
-        return sum(completeness_factors) / len(completeness_factors)
-    
-    def _assess_source_relevance(self, result) -> float:
+        return search_queries
 
-        if result.sources_analyzed == 0:
-            return 0.0
-        
-        # Ratio of sources analyzed to sources found
-        sources_found = len(result.search_results)
-        if sources_found == 0:
-            return 0.5  # Default score if no search results
-        
-        analysis_ratio = result.sources_analyzed / sources_found
-
-        # Findings per source (indicates relevance)
-        findings_per_source = len(result.key_findings) / max(result.sources_analyzed, 1)
-        findings_score = min(findings_per_source / 2.0, 1.0)  # Target: 2+ findings per source
-        
-        # Combine factors
-        relevance_score = (analysis_ratio + findings_score) / 2
-
-        return min(relevance_score, 1.0)
-    
-    def _calculate_improvements(self, results: Dict) -> Dict[str, float]:
-        
+    def _calculate_separated_improvements(self, results: Dict) -> Dict[str, float]:
+        """Calculate improvements with SEPARATED quality and speed metrics."""
         improvements = {}
 
-        # Define metrics to compare
-        metrics_to_compare = [
-            "quality_score", "efficiency_score", "iteration_efficiency",
-            "completeness_score", "relevance_score", "overall_research_score",
-            "sources_analyzed", "key_findings_count"
+        # Primary metric: Ground truth score improvement
+        original_scores = [r["quality_score"] for r in results["original"]]
+        dspy_scores = [r["quality_score"] for r in results["dspy"]]
+
+        if original_scores and dspy_scores:
+            original_avg = sum(original_scores) / len(original_scores)
+            dspy_avg = sum(dspy_scores) / len(dspy_scores)
+
+            if original_avg > 0:
+                improvement = ((dspy_avg - original_avg) / original_avg) * 100
+                improvements["ground_truth_score_improvement_percent"] = round(
+                    improvement, 2
+                )
+
+            # Raw score comparison
+            improvements["original_avg_ground_truth_score"] = round(original_avg, 4)
+            improvements["dspy_avg_ground_truth_score"] = round(dspy_avg, 4)
+
+        # Secondary metrics for analysis (not combined with quality)
+        secondary_metrics = [
+            "sources_analyzed",
+            "key_findings_count",
+            "execution_time_seconds",
+            "iterations",
         ]
 
-        for metric in metrics_to_compare:
-            original_values = [result[metric] for result in results["original"] if metric in result]
-            dspy_values = [result[metric] for result in results["dspy"] if metric in result]
+        for metric in secondary_metrics:
+            original_values = [r[metric] for r in results["original"] if metric in r]
+            dspy_values = [r[metric] for r in results["dspy"] if metric in r]
 
             if original_values and dspy_values:
                 original_avg = sum(original_values) / len(original_values)
                 dspy_avg = sum(dspy_values) / len(dspy_values)
 
                 if original_avg > 0:
-                    improvement = ((dspy_avg - original_avg) / original_avg) * 100
-                    improvements[metric] = round(improvement, 2)
-                else:
-                    improvements[metric] = 0.0
+                    change = ((dspy_avg - original_avg) / original_avg) * 100
+                    improvements[f"{metric}_change_percent"] = round(change, 2)
 
         return improvements
+
+    def _analyze_search_diversity(
+        self, search_patterns: Dict[str, List[str]]
+    ) -> Dict[str, float]:
+        """Analyze search query diversity patterns."""
+        analysis = {}
+
+        for agent_type, queries in search_patterns.items():
+            if queries:
+                unique_queries = len(set(queries))
+                total_queries = len(queries)
+
+                # Diversity score
+                diversity_score = unique_queries / max(total_queries, 1)
+
+                # Repetition analysis
+                query_counts = Counter(queries)
+                most_common = query_counts.most_common(1)
+                max_repetition = most_common[0][1] if most_common else 0
+
+                analysis[f"{agent_type}_search_diversity_score"] = round(
+                    diversity_score, 4
+                )
+                analysis[f"{agent_type}_max_query_repetition"] = max_repetition
+                analysis[f"{agent_type}_total_search_queries"] = total_queries
+                analysis[f"{agent_type}_unique_search_queries"] = unique_queries
+
+        return analysis
+
+    def _log_evaluation_analysis(self, results: Dict[str, List]):
+        """Log evaluation analysis to MLflow."""
+        try:
+            # Calculate summary statistics
+            for agent_type, agent_results in results.items():
+                if agent_results:
+                    quality_scores = [r["quality_score"] for r in agent_results]
+                    execution_times = [
+                        r["execution_time_seconds"] for r in agent_results
+                    ]
+                    sources_counts = [r["sources_analyzed"] for r in agent_results]
+
+                    # Log summary metrics
+                    mlflow.log_metrics(
+                        {
+                            f"{agent_type}_avg_quality": sum(quality_scores)
+                            / len(quality_scores),
+                            f"{agent_type}_avg_execution_time": sum(execution_times)
+                            / len(execution_times),
+                            f"{agent_type}_avg_sources": sum(sources_counts)
+                            / len(sources_counts),
+                            f"{agent_type}_min_quality": min(quality_scores),
+                            f"{agent_type}_max_quality": max(quality_scores),
+                        }
+                    )
+
+                    # Log detailed results as artifact
+                    results_file = f"{agent_type}_detailed_results.json"
+                    with open(results_file, "w") as f:
+                        json.dump(agent_results, f, indent=2)
+
+                    mlflow.log_artifact(results_file)
+                    import os
+
+                    os.remove(results_file)  # Clean up temp file
+
+        except Exception as e:
+            logger.error(f"Error logging evaluation analysis: {e}")
