@@ -29,7 +29,7 @@ def start_mlflow_ui():
 async def main():
     start_mlflow_ui()
 
-    training_size = 5
+    training_size = 12
     val_size = 3
     test_size = 3
 

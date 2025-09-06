@@ -229,6 +229,28 @@ EVALUATION_CRITERIA = {
         min_findings=4,
         domain="business",
     ),
+    "natural language processing large language models parameter scaling": GroundTruthCriteria(
+        expected_topics=[
+            "parameter scaling",
+            "large language models",
+            "model performance",
+            "computational requirements",
+        ],
+        min_sources=3,
+        min_findings=4,
+        domain="technology",
+    ),
+    "renewable energy storage market growth projections lithium-ion": GroundTruthCriteria(
+        expected_topics=[
+            "energy storage market",
+            "lithium-ion alternatives",
+            "market growth",
+            "battery technology",
+        ],
+        min_sources=3,
+        min_findings=4,
+        domain="business",
+    ),
     "electric vehicle battery technology cost reduction": GroundTruthCriteria(
         expected_topics=[
             "ev battery",
@@ -239,6 +261,83 @@ EVALUATION_CRITERIA = {
         min_sources=3,
         min_findings=4,
         domain="business",
+    ),
+    "artificial intelligence enterprise adoption ROI measurement": GroundTruthCriteria(
+        expected_topics=[
+            "ai enterprise adoption",
+            "roi measurement",
+            "implementation costs",
+            "business value",
+        ],
+        min_sources=3,
+        min_findings=4,
+        domain="business",
+    ),
+    "cloud computing infrastructure costs comparison AWS Azure": GroundTruthCriteria(
+        expected_topics=[
+            "cloud infrastructure",
+            "cost comparison",
+            "aws pricing",
+            "azure google cloud",
+        ],
+        min_sources=4,
+        min_findings=5,
+        domain="business",
+    ),
+    "cybersecurity market trends zero trust architecture implementation": GroundTruthCriteria(
+        expected_topics=[
+            "cybersecurity market",
+            "zero trust",
+            "architecture implementation",
+            "security trends",
+        ],
+        min_sources=3,
+        min_findings=4,
+        domain="business",
+    ),
+    "sustainable manufacturing automation environmental impact reduction": GroundTruthCriteria(
+        expected_topics=[
+            "sustainable manufacturing",
+            "automation",
+            "environmental impact",
+            "reduction strategies",
+        ],
+        min_sources=3,
+        min_findings=4,
+        domain="business",
+    ),
+    "digital transformation small medium enterprises technology adoption": GroundTruthCriteria(
+        expected_topics=[
+            "digital transformation",
+            "sme adoption",
+            "technology barriers",
+            "implementation challenges",
+        ],
+        min_sources=3,
+        min_findings=4,
+        domain="business",
+    ),
+    "supply chain resilience artificial intelligence predictive analytics": GroundTruthCriteria(
+        expected_topics=[
+            "supply chain resilience",
+            "ai predictive analytics",
+            "benefits",
+            "implementation",
+        ],
+        min_sources=3,
+        min_findings=4,
+        domain="business",
+    ),
+    "CRISPR gene editing therapeutic applications clinical trial": GroundTruthCriteria(
+        expected_topics=[
+            "crispr gene editing",
+            "therapeutic applications",
+            "clinical trials",
+            "success rates",
+        ],
+        min_sources=4,
+        min_findings=5,
+        domain="science",
     ),
     # Validation queries criteria
     "5G network infrastructure deployment challenges urban rural": GroundTruthCriteria(

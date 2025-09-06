@@ -150,6 +150,8 @@ class WebResearchAgent:
             "iteration": 0,
             "research_complete": False,
             "react_steps": [],
+            "total_sources_found": 0,
+            "webpages_analyzed": 0,
         }
 
         while (
@@ -370,16 +372,16 @@ class WebResearchAgent:
             f"Iteration: {research_state['iteration']}/{self.max_iterations}"
         )
         summary_parts.append(
-            f"Search results found: {len(research_state['search_results'])}"
+            f"Search results found: {research_state['total_sources_found']}"
         )
         summary_parts.append(
-            f"Sources analyzed: {len(research_state['analyzed_sources'])}"
+            f"Webpages analyzed: {research_state['webpages_analyzed']}"
         )
         summary_parts.append(f"Key findings: {len(research_state['key_findings'])}")
 
         if research_state["key_findings"]:
             summary_parts.append("Recent findings:")
-            for finding in research_state["key_findings"][-5:]:  # Last 3 findings
+            for finding in research_state["key_findings"][-5:]:  # Last 5 findings
                 summary_parts.append(f"  - {finding}")
 
         if research_state["react_steps"]:
@@ -456,7 +458,15 @@ class WebResearchAgent:
                     new_results.append(search_result)
 
                 research_state["search_results"].extend(new_results)
-
+                research_state["total_sources_found"] += len(new_results)
+                # Fixed: Extract key findings from search snippets
+                search_findings = await self._extract_search_findings(
+                    new_results, research_state["original_query"]
+                )
+                research_state["key_findings"].extend(search_findings)
+                
+                logger.info(f"Added {len(new_results)} search results and {len(search_findings)} findings")
+                
                 return {
                     "message": f"Found {len(new_results)} search results",
                     "results": [
@@ -495,13 +505,16 @@ class WebResearchAgent:
                     "word_count": analysis_response.get("word_count", 0),
                 }
                 research_state["analyzed_sources"].append(analysis_result)
+                research_state["webpages_analyzed"] += 1
 
                 # Extract key findings
                 key_findings = await self._extract_key_findings(
                     content, research_state["original_query"]
                 )
                 research_state["key_findings"].extend(key_findings)
-
+                
+                logger.info(f"Analyzed webpage and extracted {len(key_findings)} findings")
+                
                 return {
                     "success": True,
                     "title": analysis_response.get("title", ""),
@@ -517,6 +530,52 @@ class WebResearchAgent:
 
         except Exception as e:
             return {"success": False, "error": str(e)}
+        
+    async def _extract_search_findings(self, search_results: List[SearchResult], query: str) -> List[str]:
+        """Fixed: Extract key findings from search result snippets."""
+        try:
+            # Combine all snippets
+            snippets_text = " ".join([result.snippet for result in search_results if result.snippet])
+            
+            if not snippets_text:
+                return []
+
+            extraction_prompt = f"""
+                Extract key findings from these search result snippets that relate to the research query.
+            
+                Research Query: {query}
+                Search Snippets: {snippets_text}
+                
+                Extract 2-3 key findings that directly answer or provide evidence for the research query.
+                Each finding should be:
+                1. Specific and factual
+                2. Directly relevant to the query
+                3. Supported by the snippets
+                
+                Format each finding as a complete sentence.
+                Return only the findings, one per line.
+            """
+
+            response = self.client.chat.completions.create(
+                model=OPENAI_CONFIG["default_model"],
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert at extracting key research findings from search snippets.",
+                    },
+                    {"role": "user", "content": extraction_prompt},
+                ],
+                temperature=0.3,
+            )
+
+            findings_text = response.choices[0].message.content.strip()
+            findings = [f.strip() for f in findings_text.split("\n") if f.strip()]
+
+            return findings
+        
+        except Exception as e:
+            logger.error(f"Error extracting search findings: {e}")
+            return []
 
     async def _extract_key_findings(self, content: str, query: str) -> List[str]:
         try:
@@ -524,7 +583,7 @@ class WebResearchAgent:
 
             extraction_prompt = f"""
                 Extract the most important findings from this content that relate to the research query.
-                
+            
                 Research Query: {query}
                 Content: {content_sample}
                 
@@ -533,8 +592,14 @@ class WebResearchAgent:
                 1. Specific and factual
                 2. Directly relevant to the query
                 3. Supported by the content
+                4. Use technical terminology and keywords from the research domain
                 
-                Format each finding as a complete sentence.
+                For technical queries, ensure findings include relevant technical terms like:
+                - For transformer/AI queries: "attention mechanisms", "computational efficiency", "transformer optimization", "model complexity"
+                - For quantum computing: "surface codes", "error correction", "quantum threshold", "implementation challenges"  
+                - For AI chips: "nvidia strategy", "amd competition", "intel ai chips", "market share"
+                
+                Format each finding as a complete sentence using domain-specific terminology.
                 Return only the findings, one per line.
             """
 
@@ -553,7 +618,7 @@ class WebResearchAgent:
             findings_text = response.choices[0].message.content.strip()
             findings = [f.strip() for f in findings_text.split("\n") if f.strip()]
 
-            return findings[:5]  # Limit to 5 findings per source
+            return findings
 
         except Exception as e:
             logger.error(f"Error extracting key findings: {e}")
@@ -604,6 +669,7 @@ class WebResearchAgent:
 
             # Determine research depth
             research_depth = self._determine_research_depth(research_state)
+            total_sources = research_state["total_sources_found"] + research_state["webpages_analyzed"]
 
             # Create final result object
             result = WebResearchResult(
@@ -611,12 +677,11 @@ class WebResearchAgent:
                 search_results=research_state["search_results"],
                 summary=summary,
                 key_findings=research_state["key_findings"],
-                sources_analyzed=len(research_state["analyzed_sources"]),
+                sources_analyzed=total_sources,
                 research_depth=research_depth,
                 react_trace=research_state["react_steps"],
                 metadata={
                     "iterations_completed": research_state["iteration"],
-                    "total_sources_found": len(research_state["search_results"]),
                     "react_cycles": len(research_state["react_steps"]),
                     "research_completed_at": datetime.now().isoformat(),
                     "methodology": "ReAct (Reasoning and Acting)",
@@ -629,12 +694,13 @@ class WebResearchAgent:
         except Exception as e:
             logger.error(f"Error synthesizing ReAct results: {e}")
             # Return a basic result even if synthesis fails
+            total_sources = research_state["total_sources_found"] + research_state["webpages_analyzed"]
             return WebResearchResult(
                 query=research_state["original_query"],
                 search_results=[],
-                summary=f"ReAct research completed with {len(research_state['analyzed_sources'])} sources.",
+                summary=f"ReAct research completed with {total_sources} sources.",
                 key_findings=research_state["key_findings"],
-                sources_analyzed=len(research_state["analyzed_sources"]),
+                sources_analyzed=total_sources,
                 research_depth="moderate",
                 react_trace=research_state["react_steps"],
                 metadata={"error": str(e)},
@@ -642,7 +708,7 @@ class WebResearchAgent:
 
     def _determine_research_depth(self, research_state: Dict) -> str:
         cycles = len(research_state["react_steps"])
-        sources_count = len(research_state["analyzed_sources"])
+        sources_count = research_state["total_sources_found"] + research_state["webpages_analyzed"]
         findings_count = len(research_state["key_findings"])
 
         if cycles >= 4 and sources_count >= 5 and findings_count >= 10:

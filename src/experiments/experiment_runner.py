@@ -1,7 +1,7 @@
 import dspy
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-
+import mlflow
 from src.agents.web_agent import WebResearchAgent
 from src.agents.dspy_web_agent import DSPyWebResearchAgent
 from src.optimization.optimizer import DSPyOptimizer
@@ -90,6 +90,8 @@ class ExperimentRunner:
             results, improvements = await self.evaluator.compare_agents(
                 original_agent, optimized_agent, test_queries
             )
+            
+            mlflow.log_metrics(improvements)
 
             # Generate summary
             summary = self._generate_experiment_summary(

@@ -17,6 +17,7 @@ class DSPyOptimizer:
 
     def __init__(self):
         self.optimization_history = []
+        self.best_optimization_score = 0.0
 
     def optimize_agent(
         self,
@@ -48,55 +49,18 @@ class DSPyOptimizer:
 
         logger.info(f"Baseline  Val: {baseline_val_score:.3f}")
 
-        # Stage 2: Bootstrap optimization
-        bootstrap_optimizer = dspy.BootstrapFewShot(
-            metric=self._tracked_metric,
-            max_bootstrapped_demos=2,
-            max_labeled_demos=1,
-        )
-
-        logger.info("Starting BootstrapFewShot optimization...")
-        optimized_agent = bootstrap_optimizer.compile(agent, trainset=training_examples)
-
-        # Evaluate after bootstrap
-        bootstrap_val_score = self._evaluate_on_dataset(
-            optimized_agent, validation_examples[:3]
-        )
-
-        mlflow.log_metrics(
-            {
-                "bootstrap_val_score": bootstrap_val_score,
-            }
-        )
-
-        logger.info(f"Bootstrap Val: {bootstrap_val_score:.3f}")
-
-        # Stage 3: Advanced optimization if enough data
+        # Stage 2: Advanced optimization 
         logger.info("Applying MIPROv2 optimization.")
         mipro_optimization = dspy.MIPROv2(
             metric=self._tracked_metric, auto="light", num_threads=1
         )
 
         final_agent = mipro_optimization.compile(
-            optimized_agent,
+            agent,
             trainset=training_examples,
             valset=validation_examples,
-            minibatch=True,
-            minibatch_size=min(3, len(training_examples)),
+            minibatch=False,
         )
-
-        final_val_score = self._evaluate_on_dataset(
-            final_agent, validation_examples[:3]
-        )
-
-        mlflow.log_metrics(
-            {
-                "final_val_score": final_val_score,
-                "total_improvement_val": final_val_score - baseline_val_score,
-            }
-        )
-
-        logger.info(f"Final Val: {final_val_score:.3f}")
 
         # Save optimized agent
         self._save_optimized_agent(final_agent)
@@ -108,6 +72,12 @@ class DSPyOptimizer:
         """Metric wrapper that tracks optimization trials."""
         score = research_quality_metric(example, pred, trace)
 
+        mlflow.log_metrics({
+            f"optimization_trial_score": score,
+            f"optimization_trial_sources": getattr(pred, "sources_analyzed", 0),
+            f"optimization_trial_findings": len(getattr(pred, "key_findings", [])),
+        })
+        
         # Track optimization trial
         trial_info = {
             "score": score,
