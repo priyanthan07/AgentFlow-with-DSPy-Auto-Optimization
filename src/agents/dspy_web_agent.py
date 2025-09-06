@@ -56,7 +56,7 @@ class WebResearchResult:
 class WebResearchSignature(dspy.Signature):
     query: str = dspy.InputField(desc="The research question or query to investigate")
     final_answer: str = dspy.OutputField(
-        desc="Comprehensive research summary that directly answers the question"
+        desc="Comprehensive research summary based on analysis of multiple sources (target: 7+ sources, 2+ searches)"
     )
 
 
@@ -133,7 +133,7 @@ class DSPyWebResearchAgent(dspy.Module):
         self.client = None
         self.max_iterations = 3
         self.is_initialized = False
-
+        self.research_state = None
         self.available_tools = [
             {
                 "type": "function",
@@ -173,6 +173,21 @@ class DSPyWebResearchAgent(dspy.Module):
 
         logger.info("DSPy Web Research Agent initialized successfully")
 
+    def _ensure_research_state_initialized(self):
+        """Ensure research state is properly initialized and available."""
+        if self.research_state is None:
+            logger.warning("Research state not initialized - creating default state")
+            self.research_state = {
+                "original_query": "",
+                "context": [],
+                "search_results": [],
+                "key_findings": [],
+                "analyzed_sources": [],
+                "iteration": 0,
+                "research_complete": False,
+                "react_steps": [],
+            }
+            
     def _ensure_openai_client(self):
         """Ensure OpenAI client exists and is properly initialized."""
         if self.client is None or not hasattr(self.client, "_state"):
@@ -227,7 +242,13 @@ class DSPyWebResearchAgent(dspy.Module):
 
     def forward(self, query: str, context: List[Dict] = None) -> WebResearchResult:
         """DSPy forward method for optimization."""
-        return asyncio.run(self.research(query, context))
+        try:
+            loop = asyncio.get_running_loop()
+            task = asyncio.create_task(self.research(query, context))
+            return loop.run_until_complete(task)
+        
+        except RuntimeError:
+            return asyncio.run(self.research(query, context))
 
     def reset_copy(self):
         """
@@ -235,9 +256,11 @@ class DSPyWebResearchAgent(dspy.Module):
         This method is required by DSPy's BootstrapFewShot optimizer.
         """
         new_agent = self.__class__()
-
         new_agent.max_iterations = getattr(self, "max_iterations", 3)
         new_agent.is_initialized = False
+        new_agent.client = None
+        new_agent.mcp_client = None
+        new_agent.research_state = None
 
         return new_agent
 
@@ -254,15 +277,18 @@ class DSPyWebResearchAgent(dspy.Module):
         new_agent.is_initialized = False
         new_agent.client = None
         new_agent.mcp_client = None
+        new_agent.research_state = None
         return new_agent
 
     def web_search_tool(self, query: str, num_results: int = 10) -> str:
+        self._ensure_research_state_initialized()
         loop = asyncio.get_event_loop()
         return loop.run_until_complete(self._execute_web_search(query, num_results))
 
     def analyze_webpage_tool(
         self, url: str, extract_text: bool = True, summarize: bool = True
     ) -> str:
+        self._ensure_research_state_initialized()
         loop = asyncio.get_event_loop()
         return loop.run_until_complete(
             self._execute_webpage_analysis(url, extract_text, summarize)
@@ -275,12 +301,7 @@ class DSPyWebResearchAgent(dspy.Module):
 
         logger.info(f"Starting DSPy web research for query: {task_query}")
         await self._ensure_initialized()
-
-        # Clear previous trajectory data
-        self.detailed_trajectory = []
-
-        # Store current query for context
-        self.current_query = task_query
+        
         self.research_state = {
             "original_query": task_query,
             "context": context or [],
@@ -291,6 +312,9 @@ class DSPyWebResearchAgent(dspy.Module):
             "research_complete": False,
             "react_steps": [],
         }
+
+        # Store current query for context
+        self.current_query = task_query
 
         react_agent = dspy.ReAct(
             signature=WebResearchSignature,
@@ -372,12 +396,9 @@ class DSPyWebResearchAgent(dspy.Module):
         if not trajectory:
             return react_steps
 
-        # Extract steps from DSPy trajectory
-        i = 0
-
         thought_keys = [k for k in trajectory.keys() if k.startswith("thought_")]
 
-        while i < len(thought_keys):
+        for i in range(len(thought_keys)):
             thought = trajectory.get(f"thought_{i}", "")
             tool_name = trajectory.get(f"tool_name_{i}", "")
             tool_args = trajectory.get(f"tool_args_{i}", {})
@@ -395,12 +416,12 @@ class DSPyWebResearchAgent(dspy.Module):
                 reflection="CONTINUE" if i < len(thought_keys) - 1 else "CONCLUDE",
             )
             react_steps.append(react_step)
-            i += 1
 
         return react_steps
 
     async def _execute_web_search(self, query: str, num_results: int = 10) -> str:
         try:
+            self._ensure_research_state_initialized()
             if not hasattr(self, "mcp_client"):
                 await self._ensure_initialized()
 
@@ -408,13 +429,6 @@ class DSPyWebResearchAgent(dspy.Module):
             search_response = await self.mcp_client.call_tool("web_search", args)
 
             if search_response.get("success") and search_response.get("results"):
-                # Store results for later synthesis
-                if not hasattr(self, "research_state"):
-                    self.research_state = {
-                        "search_results": [],
-                        "key_findings": [],
-                        "analyzed_sources": [],
-                    }
                 new_results = []
                 for result_data in search_response["results"]:
                     search_result = SearchResult(
@@ -447,6 +461,8 @@ class DSPyWebResearchAgent(dspy.Module):
         self, url: str, extract_text: bool = True, summarize: bool = True
     ) -> str:
         try:
+            self._ensure_research_state_initialized()
+            
             if not hasattr(self, "mcp_client"):
                 await self._ensure_initialized()
 
@@ -458,14 +474,6 @@ class DSPyWebResearchAgent(dspy.Module):
                 summary = analysis_response.get("summary", "")
                 title = analysis_response.get("title", "")
                 word_count = analysis_response.get("word_count", 0)
-
-                # Initialize research state if needed
-                if not hasattr(self, "research_state"):
-                    self.research_state = {
-                        "search_results": [],
-                        "analyzed_sources": [],
-                        "key_findings": [],
-                    }
 
                 # Store analyzed source
                 analysis_result = {
@@ -524,6 +532,7 @@ class DSPyWebResearchAgent(dspy.Module):
         """Synthesize results using DSPy module."""
         try:
             self._ensure_openai_client()
+            self._ensure_research_state_initialized()
 
             search_summary = []
             for result in self.research_state["search_results"]:
@@ -546,6 +555,8 @@ class DSPyWebResearchAgent(dspy.Module):
 
             # Determine research depth (unchanged from original)
             research_depth = self._determine_research_depth()
+            total_sources = len(self.research_state["search_results"]) + len(self.research_state["analyzed_sources"])
+            logger.info(f"Final source count: {len(self.research_state['search_results'])} search + {len(self.research_state['analyzed_sources'])} analyzed = {total_sources} total")
 
             # Create final result object
             result = WebResearchResult(
@@ -553,11 +564,12 @@ class DSPyWebResearchAgent(dspy.Module):
                 search_results=self.research_state["search_results"],
                 summary=summary,
                 key_findings=self.research_state["key_findings"],
-                sources_analyzed=len(self.research_state["analyzed_sources"]),
+                sources_analyzed=total_sources,
                 research_depth=research_depth,
                 react_trace=self.research_state["react_steps"],
                 metadata={
-                    "total_sources_found": len(self.research_state["search_results"]),
+                    "total_search_sources": len(self.research_state["search_results"]),
+                    "total_analyzed_sources": len(self.research_state["analyzed_sources"]),
                     "react_cycles": len(self.research_state["react_steps"]),
                     "research_completed_at": datetime.now().isoformat(),
                     "methodology": "DSPy ReAct (Optimized Reasoning and Acting)",
@@ -570,20 +582,24 @@ class DSPyWebResearchAgent(dspy.Module):
         except Exception as e:
             logger.error(f"Error synthesizing DSPy results: {e}")
             # Return a basic result even if synthesis fails
+            self._ensure_research_state_initialized()
+            total_sources = len(self.research_state["search_results"]) + len(self.research_state["analyzed_sources"])
+            
             return WebResearchResult(
                 query=self.research_state["original_query"],
                 search_results=self.research_state.get("search_results", []),
-                summary=f"DSPy ReAct research completed with {len(self.research_state.get('analyzed_sources', []))} sources.",
+                summary=f"DSPy ReAct research completed with {total_sources} total sources.",
                 key_findings=self.research_state.get("key_findings", []),
-                sources_analyzed=len(self.research_state.get("analyzed_sources", [])),
+                sources_analyzed=total_sources,
                 research_depth="moderate",
                 react_trace=self.research_state.get("react_steps", []),
                 metadata={"error": str(e)},
             )
 
     def _determine_research_depth(self) -> str:
+        
         cycles = len(self.research_state["react_steps"])
-        sources_count = len(self.research_state["analyzed_sources"])
+        sources_count  = len(self.research_state["search_results"]) + len(self.research_state["analyzed_sources"])
         findings_count = len(self.research_state["key_findings"])
 
         if cycles >= 4 and sources_count >= 5 and findings_count >= 10:

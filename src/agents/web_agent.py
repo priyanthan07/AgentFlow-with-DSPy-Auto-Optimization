@@ -149,9 +149,7 @@ class WebResearchAgent:
             "analyzed_sources": [],
             "iteration": 0,
             "research_complete": False,
-            "react_steps": [],
-            "total_sources_found": 0,
-            "webpages_analyzed": 0,
+            "react_steps": []
         }
 
         while (
@@ -372,10 +370,10 @@ class WebResearchAgent:
             f"Iteration: {research_state['iteration']}/{self.max_iterations}"
         )
         summary_parts.append(
-            f"Search results found: {research_state['total_sources_found']}"
+            f"Search results found: {len(research_state['search_results'])}"
         )
         summary_parts.append(
-            f"Webpages analyzed: {research_state['webpages_analyzed']}"
+            f"Webpages analyzed: {len(research_state['analyzed_sources'])}"
         )
         summary_parts.append(f"Key findings: {len(research_state['key_findings'])}")
 
@@ -458,7 +456,7 @@ class WebResearchAgent:
                     new_results.append(search_result)
 
                 research_state["search_results"].extend(new_results)
-                research_state["total_sources_found"] += len(new_results)
+                
                 # Fixed: Extract key findings from search snippets
                 search_findings = await self._extract_search_findings(
                     new_results, research_state["original_query"]
@@ -505,7 +503,6 @@ class WebResearchAgent:
                     "word_count": analysis_response.get("word_count", 0),
                 }
                 research_state["analyzed_sources"].append(analysis_result)
-                research_state["webpages_analyzed"] += 1
 
                 # Extract key findings
                 key_findings = await self._extract_key_findings(
@@ -669,7 +666,9 @@ class WebResearchAgent:
 
             # Determine research depth
             research_depth = self._determine_research_depth(research_state)
-            total_sources = research_state["total_sources_found"] + research_state["webpages_analyzed"]
+            total_sources = len(research_state["search_results"]) + len(research_state["analyzed_sources"])
+
+            logger.info(f"Final source count: {len(research_state['search_results'])} search + {len(research_state['analyzed_sources'])} analyzed = {total_sources} total")
 
             # Create final result object
             result = WebResearchResult(
@@ -681,6 +680,8 @@ class WebResearchAgent:
                 research_depth=research_depth,
                 react_trace=research_state["react_steps"],
                 metadata={
+                    "total_search_sources": len(research_state["search_results"]),
+                    "total_analyzed_sources": len(research_state["analyzed_sources"]),
                     "iterations_completed": research_state["iteration"],
                     "react_cycles": len(research_state["react_steps"]),
                     "research_completed_at": datetime.now().isoformat(),
@@ -694,11 +695,11 @@ class WebResearchAgent:
         except Exception as e:
             logger.error(f"Error synthesizing ReAct results: {e}")
             # Return a basic result even if synthesis fails
-            total_sources = research_state["total_sources_found"] + research_state["webpages_analyzed"]
+            total_sources = len(research_state["search_results"]) + len(research_state["analyzed_sources"])
             return WebResearchResult(
                 query=research_state["original_query"],
                 search_results=[],
-                summary=f"ReAct research completed with {total_sources} sources.",
+                summary=f"ReAct research completed with {total_sources} total sources.",
                 key_findings=research_state["key_findings"],
                 sources_analyzed=total_sources,
                 research_depth="moderate",
@@ -708,7 +709,7 @@ class WebResearchAgent:
 
     def _determine_research_depth(self, research_state: Dict) -> str:
         cycles = len(research_state["react_steps"])
-        sources_count = research_state["total_sources_found"] + research_state["webpages_analyzed"]
+        sources_count = len(research_state["search_results"]) + len(research_state["analyzed_sources"])
         findings_count = len(research_state["key_findings"])
 
         if cycles >= 4 and sources_count >= 5 and findings_count >= 10:

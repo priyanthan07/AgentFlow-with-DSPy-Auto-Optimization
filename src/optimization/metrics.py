@@ -30,7 +30,7 @@ class ResearchMetrics:
     """Hybrid evaluation combining ground truth validation with self-reported quality metrics."""
 
     def __init__(self):
-        self.weights = {"ground_truth": 0.6, "self_reported": 0.4}
+        self.weights = {"ground_truth": 0.5, "self_reported": 0.5}
 
         self.ground_weight = {
             "topic_coverage": 0.4,

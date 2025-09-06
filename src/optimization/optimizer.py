@@ -52,7 +52,9 @@ class DSPyOptimizer:
         # Stage 2: Advanced optimization 
         logger.info("Applying MIPROv2 optimization.")
         mipro_optimization = dspy.MIPROv2(
-            metric=self._tracked_metric, auto="light", num_threads=1
+            metric=self._tracked_metric, 
+            auto="light", 
+            num_threads=1,            
         )
 
         final_agent = mipro_optimization.compile(
