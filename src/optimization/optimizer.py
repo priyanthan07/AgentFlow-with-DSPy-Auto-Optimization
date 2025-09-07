@@ -48,8 +48,18 @@ class DSPyOptimizer:
         mlflow.log_metrics({"baseline_val_score": baseline_val_score})
 
         logger.info(f"Baseline  Val: {baseline_val_score:.3f}")
+        
+        # Stage 2: Bootstrap optimization
+        logger.info("Applying BootstrapFewShot optimization.") 
+        search_optimizer = dspy.BootstrapFewShot(
+            metric=self._tracked_metric,
+            max_bootstrapped_demos=4,
+            max_labeled_demos=3
+        )
+        
+        optimized_agent = search_optimizer.compile(agent, trainset=training_examples[:5])
 
-        # Stage 2: Advanced optimization 
+        # Stage 3: Advanced optimization 
         logger.info("Applying MIPROv2 optimization.")
         mipro_optimization = dspy.MIPROv2(
             metric=self._tracked_metric, 
@@ -58,10 +68,9 @@ class DSPyOptimizer:
         )
 
         final_agent = mipro_optimization.compile(
-            agent,
+            optimized_agent,
             trainset=training_examples,
             valset=validation_examples,
-            minibatch=False,
         )
 
         # Save optimized agent

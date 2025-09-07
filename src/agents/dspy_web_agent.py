@@ -56,7 +56,7 @@ class WebResearchResult:
 class WebResearchSignature(dspy.Signature):
     query: str = dspy.InputField(desc="The research question or query to investigate")
     final_answer: str = dspy.OutputField(
-        desc="Comprehensive research summary based on analysis of multiple sources (target: 7+ sources, 2+ searches)"
+        desc="Comprehensive research summary based on analysis of multiple sources (target: do as much as searches in each iteration. Do not just limit yourself)"
     )
 
 
@@ -340,7 +340,7 @@ class DSPyWebResearchAgent(dspy.Module):
         final_result = await self._dspy_synthesize_results()
 
         logger.info(
-            f"DSPy Web research completed with {len(final_result.search_results)} sources"
+            f"DSPy Web research completed with {final_result.sources_analyzed} sources"
         )
         return final_result
 
